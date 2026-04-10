@@ -1,21 +1,52 @@
 from flask import Flask, request, jsonify
-import json, os, uuid
+import os, uuid
 from datetime import datetime, date
 
 app = Flask(__name__)
-DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'wbs.json')
 
-def load():
-    if not os.path.exists(DATA_FILE):
-        data = {"projects": [], "tasks": [], "kpis": []}
-        save(data)
-        return data
-    with open(DATA_FILE, encoding='utf-8') as f:
-        return json.load(f)
+# ── PostgreSQL接続 ──
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
-def save(data):
-    with open(DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def get_conn():
+    return psycopg2.connect(os.environ.get('DATABASE_URL'), sslmode='require')
+
+def init_db():
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS projects (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT DEFAULT '',
+                    color TEXT DEFAULT '#1976d2',
+                    created_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT,
+                    title TEXT NOT NULL,
+                    description TEXT DEFAULT '',
+                    assignee TEXT DEFAULT '',
+                    priority TEXT DEFAULT 'medium',
+                    status TEXT DEFAULT 'todo',
+                    progress INTEGER DEFAULT 0,
+                    due_date TEXT DEFAULT '',
+                    created_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS kpis (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT,
+                    name TEXT NOT NULL,
+                    target FLOAT DEFAULT 100,
+                    current FLOAT DEFAULT 0,
+                    unit TEXT DEFAULT '',
+                    created_at TEXT
+                );
+            """)
+        conn.commit()
+
+init_db()
 
 @app.route('/')
 def index():
@@ -24,129 +55,156 @@ def index():
 # ── Projects ──
 @app.route('/api/projects', methods=['GET'])
 def get_projects():
-    return jsonify(load()['projects'])
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM projects ORDER BY created_at")
+            return jsonify([dict(r) for r in cur.fetchall()])
 
 @app.route('/api/projects', methods=['POST'])
 def add_project():
-    data = load()
     b = request.get_json()
     p = {'id': str(uuid.uuid4()), 'name': b.get('name','').strip(), 'description': b.get('description','').strip(), 'color': b.get('color','#1976d2'), 'created_at': datetime.now().isoformat()}
     if not p['name']: return jsonify({'error': '名前は必須'}), 400
-    data['projects'].append(p)
-    save(data)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO projects VALUES (%s,%s,%s,%s,%s)", (p['id'],p['name'],p['description'],p['color'],p['created_at']))
+        conn.commit()
     return jsonify(p), 201
 
 @app.route('/api/projects/<pid>', methods=['PUT'])
 def update_project(pid):
-    data = load()
     b = request.get_json()
-    for p in data['projects']:
-        if p['id'] == pid:
-            p['name'] = b.get('name', p['name']).strip()
-            p['description'] = b.get('description', p['description']).strip()
-            p['color'] = b.get('color', p['color'])
-            save(data)
-            return jsonify(p)
-    return jsonify({'error': 'not found'}), 404
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("UPDATE projects SET name=%s, description=%s, color=%s WHERE id=%s RETURNING *",
+                (b.get('name'), b.get('description'), b.get('color'), pid))
+            row = cur.fetchone()
+        conn.commit()
+    return jsonify(dict(row)) if row else (jsonify({'error': 'not found'}), 404)
 
 @app.route('/api/projects/<pid>', methods=['DELETE'])
 def del_project(pid):
-    data = load()
-    data['projects'] = [p for p in data['projects'] if p['id'] != pid]
-    data['tasks'] = [t for t in data['tasks'] if t.get('project_id') != pid]
-    data['kpis'] = [k for k in data['kpis'] if k.get('project_id') != pid]
-    save(data)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM tasks WHERE project_id=%s", (pid,))
+            cur.execute("DELETE FROM kpis WHERE project_id=%s", (pid,))
+            cur.execute("DELETE FROM projects WHERE id=%s", (pid,))
+        conn.commit()
     return jsonify({'ok': True})
 
 # ── Tasks ──
 @app.route('/api/tasks', methods=['GET'])
 def get_tasks():
-    data = load()
     pid = request.args.get('project_id')
-    tasks = [t for t in data['tasks'] if t.get('project_id') == pid] if pid else data['tasks']
-    return jsonify(tasks)
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if pid:
+                cur.execute("SELECT * FROM tasks WHERE project_id=%s ORDER BY created_at", (pid,))
+            else:
+                cur.execute("SELECT * FROM tasks ORDER BY created_at")
+            return jsonify([dict(r) for r in cur.fetchall()])
 
 @app.route('/api/tasks', methods=['POST'])
 def add_task():
-    data = load()
     b = request.get_json()
     t = {'id': str(uuid.uuid4()), 'project_id': b.get('project_id',''), 'title': b.get('title','').strip(), 'description': b.get('description','').strip(), 'assignee': b.get('assignee','').strip(), 'priority': b.get('priority','medium'), 'status': 'todo', 'progress': 0, 'due_date': b.get('due_date',''), 'created_at': datetime.now().isoformat()}
     if not t['title']: return jsonify({'error': 'タイトルは必須'}), 400
-    data['tasks'].append(t)
-    save(data)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO tasks VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (t['id'],t['project_id'],t['title'],t['description'],t['assignee'],t['priority'],t['status'],t['progress'],t['due_date'],t['created_at']))
+        conn.commit()
     return jsonify(t), 201
 
 @app.route('/api/tasks/<tid>', methods=['PUT'])
 def update_task(tid):
-    data = load()
     b = request.get_json()
-    for t in data['tasks']:
-        if t['id'] == tid:
-            for k in ['title','description','assignee','priority','status','progress','due_date']:
-                if k in b: t[k] = b[k]
-            save(data)
-            return jsonify(t)
-    return jsonify({'error': 'not found'}), 404
+    fields = []
+    vals = []
+    for k in ['title','description','assignee','priority','status','due_date']:
+        if k in b:
+            fields.append(f"{k}=%s")
+            vals.append(b[k])
+    if 'progress' in b:
+        fields.append("progress=%s")
+        vals.append(int(b['progress']))
+    if not fields:
+        return jsonify({'error': 'no fields'}), 400
+    vals.append(tid)
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(f"UPDATE tasks SET {','.join(fields)} WHERE id=%s RETURNING *", vals)
+            row = cur.fetchone()
+        conn.commit()
+    return jsonify(dict(row)) if row else (jsonify({'error': 'not found'}), 404)
 
 @app.route('/api/tasks/<tid>', methods=['DELETE'])
 def del_task(tid):
-    data = load()
-    data['tasks'] = [t for t in data['tasks'] if t['id'] != tid]
-    save(data)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM tasks WHERE id=%s", (tid,))
+        conn.commit()
     return jsonify({'ok': True})
 
 # ── KPIs ──
 @app.route('/api/kpis', methods=['GET'])
 def get_kpis():
-    data = load()
     pid = request.args.get('project_id')
-    kpis = [k for k in data['kpis'] if k.get('project_id') == pid] if pid else data['kpis']
-    return jsonify(kpis)
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if pid:
+                cur.execute("SELECT * FROM kpis WHERE project_id=%s ORDER BY created_at", (pid,))
+            else:
+                cur.execute("SELECT * FROM kpis ORDER BY created_at")
+            return jsonify([dict(r) for r in cur.fetchall()])
 
 @app.route('/api/kpis', methods=['POST'])
 def add_kpi():
-    data = load()
     b = request.get_json()
     k = {'id': str(uuid.uuid4()), 'project_id': b.get('project_id',''), 'name': b.get('name','').strip(), 'target': float(b.get('target',100)), 'current': float(b.get('current',0)), 'unit': b.get('unit','').strip(), 'created_at': datetime.now().isoformat()}
     if not k['name']: return jsonify({'error': '名前は必須'}), 400
-    data['kpis'].append(k)
-    save(data)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO kpis VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                (k['id'],k['project_id'],k['name'],k['target'],k['current'],k['unit'],k['created_at']))
+        conn.commit()
     return jsonify(k), 201
 
 @app.route('/api/kpis/<kid>', methods=['PUT'])
 def update_kpi(kid):
-    data = load()
     b = request.get_json()
-    for k in data['kpis']:
-        if k['id'] == kid:
-            for key in ['name','unit']:
-                if key in b: k[key] = b[key]
-            for key in ['target','current']:
-                if key in b: k[key] = float(b[key])
-            save(data)
-            return jsonify(k)
-    return jsonify({'error': 'not found'}), 404
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("UPDATE kpis SET name=%s, target=%s, current=%s, unit=%s WHERE id=%s RETURNING *",
+                (b.get('name'), float(b.get('target',100)), float(b.get('current',0)), b.get('unit',''), kid))
+            row = cur.fetchone()
+        conn.commit()
+    return jsonify(dict(row)) if row else (jsonify({'error': 'not found'}), 404)
 
 @app.route('/api/kpis/<kid>', methods=['DELETE'])
 def del_kpi(kid):
-    data = load()
-    data['kpis'] = [k for k in data['kpis'] if k['id'] != kid]
-    save(data)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM kpis WHERE id=%s", (kid,))
+        conn.commit()
     return jsonify({'ok': True})
 
 @app.route('/api/summary', methods=['GET'])
 def summary():
-    data = load()
-    tasks = data['tasks']
-    today = str(date.today())
-    overdue = sum(1 for t in tasks if t.get('due_date') and t['status'] != 'done' and t['due_date'] < today)
-    return jsonify({
-        'total_projects': len(data['projects']),
-        'total_tasks': len(tasks),
-        'done_tasks': sum(1 for t in tasks if t['status'] == 'done'),
-        'doing_tasks': sum(1 for t in tasks if t['status'] == 'doing'),
-        'overdue_tasks': overdue,
-    })
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM projects")
+            total_projects = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM tasks")
+            total_tasks = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM tasks WHERE status='done'")
+            done_tasks = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM tasks WHERE status='doing'")
+            doing_tasks = cur.fetchone()[0]
+            today = str(date.today())
+            cur.execute("SELECT COUNT(*) FROM tasks WHERE due_date < %s AND status != 'done' AND due_date != ''", (today,))
+            overdue_tasks = cur.fetchone()[0]
+    return jsonify({'total_projects': total_projects, 'total_tasks': total_tasks, 'done_tasks': done_tasks, 'doing_tasks': doing_tasks, 'overdue_tasks': overdue_tasks})
 
 HTML = """<!DOCTYPE html>
 <html lang="ja">
@@ -164,22 +222,17 @@ nav button{flex:1;min-width:80px;padding:12px 8px;border:none;background:none;fo
 nav button.active{color:#1976d2;border-bottom-color:#1976d2;font-weight:700}
 .page{display:none;padding:16px;max-width:900px;margin:0 auto}
 .page.active{display:block}
-
-/* Stats */
 .stats{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:16px}
 .stat-card{background:#fff;border-radius:12px;padding:14px;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.08)}
 .stat-num{font-size:24px;font-weight:700;color:#1976d2}
 .stat-num.danger{color:#e53935}
 .stat-label{font-size:11px;color:#999;margin-top:2px}
-
-/* Project Card */
 .project-block{background:#fff;border-radius:14px;margin-bottom:16px;box-shadow:0 2px 10px rgba(0,0,0,.08);overflow:hidden}
 .project-header{padding:14px 16px;display:flex;align-items:center;justify-content:space-between;cursor:pointer}
 .project-header-left{display:flex;align-items:center;gap:10px}
 .project-color-bar{width:4px;height:40px;border-radius:2px}
 .project-name{font-size:16px;font-weight:700}
 .project-desc{font-size:12px;color:#999;margin-top:2px}
-.project-meta{display:flex;gap:8px;align-items:center}
 .project-stats{display:flex;gap:6px}
 .ps-badge{padding:3px 8px;border-radius:10px;font-size:11px;font-weight:600}
 .ps-total{background:#e3f2fd;color:#1565c0}
@@ -189,13 +242,9 @@ nav button.active{color:#1976d2;border-bottom-color:#1976d2;font-weight:700}
 .chevron.open{transform:rotate(180deg)}
 .project-body{display:none;border-top:1px solid #f0f0f0;padding:16px}
 .project-body.open{display:block}
-
-/* Sections inside project */
-.section-title{font-size:13px;font-weight:700;color:#555;margin-bottom:10px;display:flex;align-items:center;gap:6px}
-.add-btn{padding:5px 10px;border:1px dashed #aaa;border-radius:8px;background:none;cursor:pointer;font-size:12px;color:#888;margin-bottom:10px;transition:.2s}
+.section-title{font-size:13px;font-weight:700;color:#555;margin-bottom:10px}
+.add-btn{padding:5px 10px;border:1px dashed #aaa;border-radius:8px;background:none;cursor:pointer;font-size:12px;color:#888;margin-bottom:10px}
 .add-btn:hover{border-color:#1976d2;color:#1976d2}
-
-/* Task item */
 .task-item{background:#f8f9fb;border-radius:10px;padding:12px;margin-bottom:8px;border-left:3px solid #e0e0e0}
 .task-item.status-doing{border-left-color:#fb8c00}
 .task-item.status-done{border-left-color:#43a047;opacity:.8}
@@ -218,8 +267,6 @@ nav button.active{color:#1976d2;border-bottom-color:#1976d2;font-weight:700}
 .btn-del{background:#ffebee;color:#c62828}
 .btn-save{background:#e8f5e9;color:#2e7d32}
 .btn-cancel{background:#f5f5f5;color:#666}
-
-/* KPI item */
 .kpi-item{background:#f8f9fb;border-radius:10px;padding:12px;margin-bottom:8px}
 .kpi-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
 .kpi-name{font-size:14px;font-weight:600}
@@ -227,26 +274,18 @@ nav button.active{color:#1976d2;border-bottom-color:#1976d2;font-weight:700}
 .kpi-bar{height:8px;background:#e0e0e0;border-radius:4px;overflow:hidden;margin:4px 0}
 .kpi-fill{height:100%;background:linear-gradient(90deg,#43a047,#76c442);border-radius:4px;transition:.4s}
 .kpi-footer{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:#999}
-
-/* Inline edit form */
 .edit-form{background:#fff;border:1px solid #e0e0e0;border-radius:10px;padding:12px;margin-top:8px;display:none}
 .edit-form.show{display:block}
 .form-row{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}
-.form-row input,.form-row select,.form-row textarea{flex:1;min-width:100px;padding:8px;border:1px solid #ddd;border-radius:8px;font-size:13px}
+.form-row input,.form-row select{flex:1;min-width:100px;padding:8px;border:1px solid #ddd;border-radius:8px;font-size:13px}
 .form-row label{font-size:11px;color:#888;width:100%;margin-bottom:2px}
 .form-actions{display:flex;gap:6px;margin-top:8px}
-
-/* Add form */
 .add-form{background:#f0f7ff;border:1px dashed #90caf9;border-radius:10px;padding:12px;margin-bottom:10px;display:none}
 .add-form.show{display:block}
-
-/* Utility */
 .empty{text-align:center;color:#bbb;padding:16px;font-size:13px}
 .divider{border:none;border-top:1px solid #f0f0f0;margin:12px 0}
 .color-dot{width:12px;height:12px;border-radius:50%;display:inline-block}
 select.status-select{padding:4px 6px;border:1px solid #ddd;border-radius:6px;font-size:12px;cursor:pointer}
-
-/* Dashboard */
 .dash-project{background:#fff;border-radius:12px;padding:14px;margin-bottom:10px;box-shadow:0 2px 8px rgba(0,0,0,.08);border-left:4px solid #1976d2}
 .dash-proj-name{font-weight:700;font-size:15px;margin-bottom:8px}
 .dash-task-row{display:flex;justify-content:space-between;align-items:center;font-size:13px;padding:4px 0;border-bottom:1px solid #f5f5f5}
@@ -263,7 +302,6 @@ select.status-select{padding:4px 6px;border:1px solid #ddd;border-radius:6px;fon
   <button onclick="showPage('projects',this)">📁 プロジェクト</button>
 </nav>
 
-<!-- Dashboard -->
 <div id="dashboard" class="page active">
   <div class="stats">
     <div class="stat-card"><div class="stat-num" id="s-proj">0</div><div class="stat-label">プロジェクト</div></div>
@@ -275,9 +313,7 @@ select.status-select{padding:4px 6px;border:1px solid #ddd;border-radius:6px;fon
   <div id="dash-content"></div>
 </div>
 
-<!-- Projects (main view) -->
 <div id="projects" class="page">
-  <!-- Add Project Form -->
   <div style="background:#fff;border-radius:12px;padding:16px;margin-bottom:16px;box-shadow:0 2px 8px rgba(0,0,0,.08)">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
       <h3 style="font-size:15px">📁 プロジェクト一覧</h3>
@@ -316,11 +352,7 @@ function showPage(id,btn){
 }
 
 async function loadAll(){
-  [projects,tasks,kpis]=await Promise.all([
-    api('GET','/api/projects'),
-    api('GET','/api/tasks'),
-    api('GET','/api/kpis')
-  ]);
+  [projects,tasks,kpis]=await Promise.all([api('GET','/api/projects'),api('GET','/api/tasks'),api('GET','/api/kpis')]);
   const s=await api('GET','/api/summary');
   document.getElementById('s-proj').textContent=s.total_projects;
   document.getElementById('s-tasks').textContent=s.total_tasks;
@@ -331,7 +363,6 @@ async function loadAll(){
   renderProjects();
 }
 
-// ── Dashboard ──
 function renderDashboard(){
   const el=document.getElementById('dash-content');
   if(!projects.length){el.innerHTML='<div class="empty">プロジェクトなし</div>';return;}
@@ -350,21 +381,12 @@ function renderDashboard(){
         ${pkpis.length?`<span class="ps-badge" style="background:#f3e5f5;color:#6a1b9a">KPI ${pkpis.length}</span>`:''}
       </div>
       <div class="progress-bar" style="width:100%;height:8px;margin-bottom:8px"><div class="progress-fill" style="width:${pct}%"></div></div>
-      ${ptasks.filter(t=>t.status!=='done').slice(0,3).map(t=>`
-        <div class="dash-task-row">
-          <span>${t.title}</span>
-          <span class="badge badge-${t.status}">${statusLabel(t.status)}</span>
-        </div>`).join('')}
-      ${pkpis.map(k=>{const pp=Math.min(100,Math.round(k.current/k.target*100));return`
-        <div class="dash-task-row">
-          <span>📈 ${k.name}: ${k.current}/${k.target}${k.unit}</span>
-          <span style="color:#43a047;font-weight:bold">${pp}%</span>
-        </div>`}).join('')}
+      ${ptasks.filter(t=>t.status!=='done').slice(0,3).map(t=>`<div class="dash-task-row"><span>${t.title}</span><span class="badge badge-${t.status}">${statusLabel(t.status)}</span></div>`).join('')}
+      ${pkpis.map(k=>{const pp=Math.min(100,Math.round(k.current/k.target*100));return`<div class="dash-task-row"><span>📈 ${k.name}: ${k.current}/${k.target}${k.unit}</span><span style="color:#43a047;font-weight:bold">${pp}%</span></div>`}).join('')}
     </div>`;
   }).join('');
 }
 
-// ── Projects ──
 function renderProjects(){
   const el=document.getElementById('projects-list');
   if(!projects.length){el.innerHTML='<div class="empty">プロジェクトなし</div>';return;}
@@ -380,10 +402,7 @@ function renderProjectBlock(p){
     <div class="project-header" onclick="toggleProject('${p.id}')">
       <div class="project-header-left">
         <div class="project-color-bar" style="background:${p.color||'#1976d2'}"></div>
-        <div>
-          <div class="project-name">${p.name}</div>
-          ${p.description?`<div class="project-desc">${p.description}</div>`:''}
-        </div>
+        <div><div class="project-name">${p.name}</div>${p.description?`<div class="project-desc">${p.description}</div>`:''}</div>
       </div>
       <div style="display:flex;align-items:center;gap:10px">
         <div class="project-stats">
@@ -399,8 +418,6 @@ function renderProjectBlock(p){
         <span class="chevron" id="chev-${p.id}">▼</span>
       </div>
     </div>
-
-    <!-- Project Edit Form -->
     <div class="edit-form" id="edit-proj-${p.id}" style="margin:0 16px 8px">
       <div class="form-row">
         <input id="ep-name-${p.id}" value="${p.name}" placeholder="プロジェクト名" />
@@ -412,9 +429,7 @@ function renderProjectBlock(p){
         <button class="btn-sm btn-cancel" onclick="hideEditProject('${p.id}')">キャンセル</button>
       </div>
     </div>
-
     <div class="project-body" id="body-${p.id}">
-      <!-- Tasks Section -->
       <div class="section-title">✅ タスク</div>
       <button class="add-btn" onclick="showAddTask('${p.id}')">＋ タスク追加</button>
       <div class="add-form" id="add-task-${p.id}">
@@ -423,13 +438,7 @@ function renderProjectBlock(p){
           <input id="nt-assignee-${p.id}" placeholder="担当者" style="max-width:120px" />
         </div>
         <div class="form-row">
-          <div style="flex:1"><label>優先度</label>
-            <select id="nt-priority-${p.id}">
-              <option value="high">高</option>
-              <option value="medium" selected>中</option>
-              <option value="low">低</option>
-            </select>
-          </div>
+          <div style="flex:1"><label>優先度</label><select id="nt-priority-${p.id}"><option value="high">高</option><option value="medium" selected>中</option><option value="low">低</option></select></div>
           <div style="flex:1"><label>期限</label><input id="nt-due-${p.id}" type="date" /></div>
         </div>
         <div class="form-actions">
@@ -437,13 +446,8 @@ function renderProjectBlock(p){
           <button class="btn-sm btn-cancel" onclick="hideAddTask('${p.id}')">キャンセル</button>
         </div>
       </div>
-      <div id="tasks-${p.id}">
-        ${ptasks.length?ptasks.map(t=>renderTask(t)).join(''):'<div class="empty">タスクなし</div>'}
-      </div>
-
+      <div id="tasks-${p.id}">${ptasks.length?ptasks.map(t=>renderTask(t)).join(''):'<div class="empty">タスクなし</div>'}</div>
       <hr class="divider">
-
-      <!-- KPI Section -->
       <div class="section-title">📈 KPI</div>
       <button class="add-btn" onclick="showAddKpi('${p.id}')">＋ KPI追加</button>
       <div class="add-form" id="add-kpi-${p.id}">
@@ -457,9 +461,7 @@ function renderProjectBlock(p){
           <button class="btn-sm btn-cancel" onclick="hideAddKpi('${p.id}')">キャンセル</button>
         </div>
       </div>
-      <div id="kpis-${p.id}">
-        ${pkpis.length?pkpis.map(k=>renderKpi(k)).join(''):'<div class="empty">KPIなし</div>'}
-      </div>
+      <div id="kpis-${p.id}">${pkpis.length?pkpis.map(k=>renderKpi(k)).join(''):'<div class="empty">KPIなし</div>'}</div>
     </div>
   </div>`;
 }
@@ -475,7 +477,7 @@ function renderTask(t){
     </div>
     <div class="task-meta">
       <span class="badge badge-${t.priority}">${priorityLabel(t.priority)}</span>
-      <select class="status-select badge-${t.status}" onchange="updateTaskStatus('${t.id}',this.value)">
+      <select class="status-select" onchange="updateTaskStatus('${t.id}',this.value)">
         <option value="todo" ${t.status==='todo'?'selected':''}>未着手</option>
         <option value="doing" ${t.status==='doing'?'selected':''}>進行中</option>
         <option value="done" ${t.status==='done'?'selected':''}>完了</option>
@@ -491,13 +493,7 @@ function renderTask(t){
         <input id="et-assignee-${t.id}" value="${t.assignee||''}" placeholder="担当者" style="max-width:120px" />
       </div>
       <div class="form-row">
-        <div style="flex:1"><label>優先度</label>
-          <select id="et-priority-${t.id}">
-            <option value="high" ${t.priority==='high'?'selected':''}>高</option>
-            <option value="medium" ${t.priority==='medium'?'selected':''}>中</option>
-            <option value="low" ${t.priority==='low'?'selected':''}>低</option>
-          </select>
-        </div>
+        <div style="flex:1"><label>優先度</label><select id="et-priority-${t.id}"><option value="high" ${t.priority==='high'?'selected':''}>高</option><option value="medium" ${t.priority==='medium'?'selected':''}>中</option><option value="low" ${t.priority==='low'?'selected':''}>低</option></select></div>
         <div style="flex:1"><label>期限</label><input id="et-due-${t.id}" type="date" value="${t.due_date||''}" /></div>
       </div>
       <div class="form-actions">
@@ -538,13 +534,7 @@ function renderKpi(k){
   </div>`;
 }
 
-// ── Toggle ──
-function toggleProject(id){
-  const body=document.getElementById('body-'+id);
-  const chev=document.getElementById('chev-'+id);
-  body.classList.toggle('open');
-  chev.classList.toggle('open');
-}
+function toggleProject(id){document.getElementById('body-'+id).classList.toggle('open');document.getElementById('chev-'+id).classList.toggle('open')}
 function toggleAddProject(){document.getElementById('add-project-form').classList.toggle('show')}
 function showAddTask(pid){document.getElementById('add-task-'+pid).classList.add('show')}
 function hideAddTask(pid){document.getElementById('add-task-'+pid).classList.remove('show')}
@@ -557,7 +547,6 @@ function hideEditKpi(id){document.getElementById('edit-kpi-'+id).classList.remov
 function showEditProject(id){document.getElementById('edit-proj-'+id).classList.add('show')}
 function hideEditProject(id){document.getElementById('edit-proj-'+id).classList.remove('show')}
 
-// ── CRUD ──
 async function addProject(){
   const name=document.getElementById('np-name').value.trim();
   const desc=document.getElementById('np-desc').value.trim();
@@ -573,15 +562,10 @@ async function saveProject(id){
   const name=document.getElementById('ep-name-'+id).value.trim();
   const desc=document.getElementById('ep-desc-'+id).value.trim();
   const color=document.getElementById('ep-color-'+id).value;
-  if(!name){alert('プロジェクト名を入力してください');return;}
   await api('PUT','/api/projects/'+id,{name,description:desc,color});
   loadAll();
 }
-async function delProject(id){
-  if(!confirm('プロジェクトと関連タスク・KPIを全て削除しますか？'))return;
-  await api('DELETE','/api/projects/'+id);
-  loadAll();
-}
+async function delProject(id){if(!confirm('削除しますか？'))return;await api('DELETE','/api/projects/'+id);loadAll()}
 async function addTask(pid){
   const title=document.getElementById('nt-title-'+pid).value.trim();
   const assignee=document.getElementById('nt-assignee-'+pid).value.trim();
