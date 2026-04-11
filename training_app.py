@@ -36,6 +36,7 @@ def init_db():
                 ALTER TABLE logs ADD COLUMN IF NOT EXISTS note TEXT DEFAULT '';
             """)
         conn.commit()
+
 init_db()
 
 PRAISE_MESSAGES = [
@@ -267,7 +268,6 @@ h3{font-size:16px;margin-bottom:12px;color:#333}
 .badge-skip{background:#ffebee;color:#e53935;padding:3px 8px;border-radius:10px;font-size:11px}
 .empty{text-align:center;color:#bbb;padding:20px;font-size:14px}
 .reward-list-item{display:flex;align-items:center;gap:10px;padding:10px;border-radius:8px;background:#fff9c4;border:1px solid #f9a825;margin-bottom:8px}
-/* 日付ナビゲーション */
 .date-nav{display:flex;align-items:center;justify-content:space-between;background:#fff;border-radius:12px;padding:12px 16px;margin-bottom:12px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
 .date-nav-btn{background:#e8f5e9;border:none;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:18px;color:#43a047;font-weight:bold}
 .date-nav-btn:hover{background:#c8e6c9}
@@ -275,17 +275,6 @@ h3{font-size:16px;margin-bottom:12px;color:#333}
 .date-display-main{font-size:16px;font-weight:bold;color:#333}
 .date-display-sub{font-size:12px;color:#999;margin-top:2px}
 .date-today-btn{background:#43a047;color:#fff;border:none;border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer;margin-top:4px}
-/* 過去実績入力 */
-.past-log-section{background:#fff3e0;border:1px solid #ffb74d;border-radius:12px;padding:14px;margin-bottom:12px}
-.past-log-title{font-size:14px;font-weight:bold;color:#e65100;margin-bottom:10px}
-.past-menu-row{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid #ffe0b2}
-.past-menu-row:last-child{border-bottom:none}
-.past-menu-name{font-size:14px;flex:1}
-.past-toggle{display:flex;gap:6px}
-.past-btn{padding:5px 12px;border:none;border-radius:16px;cursor:pointer;font-size:12px;font-weight:bold}
-.past-btn-done{background:#43a047;color:#fff}
-.past-btn-skip{background:#ef5350;color:#fff}
-.past-btn-none{background:#e0e0e0;color:#666}
 </style>
 </head>
 <body>
@@ -317,8 +306,6 @@ h3{font-size:16px;margin-bottom:12px;color:#333}
     <div class="stat-card"><div class="stat-num" id="stat-today">0</div><div class="stat-label">今日完了</div></div>
     <div class="stat-card"><div class="stat-num" id="stat-all">0</div><div class="stat-label">累計完了</div></div>
   </div>
-
-  <!-- 日付ナビゲーション -->
   <div class="date-nav">
     <button class="date-nav-btn" onclick="changeDate(-1)">‹</button>
     <div class="date-display">
@@ -328,7 +315,6 @@ h3{font-size:16px;margin-bottom:12px;color:#333}
     </div>
     <button class="date-nav-btn" onclick="changeDate(1)" id="next-btn">›</button>
   </div>
-
   <div class="card">
     <h3 id="day-title">📅 トレーニング記録</h3>
     <div id="today-list"></div>
@@ -395,37 +381,41 @@ let menus=[], allLogs=[];
 let currentDate = new Date();
 currentDate.setHours(0,0,0,0);
 
-function dateToStr(d){return d.toISOString().slice(0,10)}
+function dateToStr(d){
+  const y=d.getFullYear();
+  const m=String(d.getMonth()+1).padStart(2,'0');
+  const day=String(d.getDate()).padStart(2,'0');
+  return y+'-'+m+'-'+day;
+}
 function todayStr(){return dateToStr(new Date())}
 
 function updateDateNav(){
-  const today = new Date();today.setHours(0,0,0,0);
-  const isToday = currentDate.getTime()===today.getTime();
-  const isFuture = currentDate > today;
-  document.getElementById('next-btn').style.opacity = isFuture?'0.3':'1';
-  document.getElementById('next-btn').disabled = isFuture;
-  document.getElementById('today-btn').style.display = isToday?'none':'inline-block';
-  const dateStr = dateToStr(currentDate);
-  const dayLabel = DAYS_JP[currentDate.getDay()];
-  document.getElementById('date-display-main').textContent = 
+  const today=new Date();today.setHours(0,0,0,0);
+  const isToday=currentDate.getTime()===today.getTime();
+  const isFuture=currentDate>today;
+  document.getElementById('next-btn').style.opacity=isFuture?'0.3':'1';
+  document.getElementById('next-btn').disabled=isFuture;
+  document.getElementById('today-btn').style.display=isToday?'none':'inline-block';
+  const dayLabel=DAYS_JP[currentDate.getDay()];
+  document.getElementById('date-display-main').textContent=
     currentDate.toLocaleDateString('ja-JP',{year:'numeric',month:'long',day:'numeric'});
-  document.getElementById('date-display-sub').textContent = `（${dayLabel}曜日）${isToday?'今日':''}`;
-  document.getElementById('day-title').textContent = 
-    isToday ? '📅 今日のトレーニング' : `📅 ${dateStr} のトレーニング`;
+  document.getElementById('date-display-sub').textContent=`（${dayLabel}曜日）${isToday?'今日':''}`;
+  document.getElementById('day-title').textContent=
+    isToday?'📅 今日のトレーニング':`📅 ${dateToStr(currentDate)} のトレーニング`;
 }
 
 function changeDate(delta){
-  const today = new Date();today.setHours(0,0,0,0);
-  const next = new Date(currentDate);
+  const today=new Date();today.setHours(0,0,0,0);
+  const next=new Date(currentDate);
   next.setDate(next.getDate()+delta);
   if(next>today) return;
-  currentDate = next;
+  currentDate=next;
   updateDateNav();
   loadDayLogs();
 }
 
 function goToday(){
-  currentDate = new Date();currentDate.setHours(0,0,0,0);
+  currentDate=new Date();currentDate.setHours(0,0,0,0);
   updateDateNav();
   loadDayLogs();
 }
@@ -449,7 +439,7 @@ async function api(method,path,body){
 }
 
 async function loadAll(){
-  [menus, allLogs] = await Promise.all([
+  [menus,allLogs]=await Promise.all([
     api('GET','/api/menus'),
     api('GET','/api/logs/all')
   ]);
@@ -463,26 +453,20 @@ async function loadAll(){
 }
 
 async function loadDayLogs(){
-  allLogs = await api('GET','/api/logs/all');
+  allLogs=await api('GET','/api/logs/all');
   const summary=await api('GET','/api/summary');
   document.getElementById('stat-today').textContent=summary.today_completed;
   document.getElementById('stat-all').textContent=summary.total_logs;
   renderDayLogs();
 }
 
-function getLogsForDate(dateStr){
-  return allLogs.filter(l=>l.log_date===dateStr);
-}
-
 function renderDayLogs(){
   const el=document.getElementById('today-list');
   const dateStr=dateToStr(currentDate);
-  const dayLogs=getLogsForDate(dateStr);
+  const dayLogs=allLogs.filter(l=>l.log_date===dateStr);
   const dayLabel=DAYS_JP[currentDate.getDay()];
   const today=new Date();today.setHours(0,0,0,0);
   const isToday=currentDate.getTime()===today.getTime();
-
-  const dayMenus=menus.filter(m=>!m.day_of_week.length||m.day_of_week.includes(dayLabel));
 
   if(!menus.length){
     el.innerHTML='<div class="empty">メニューなし<br><small>メニュータブから追加してください</small></div>';
@@ -497,7 +481,6 @@ function renderDayLogs(){
     const pct=Math.min(100,Math.round(m.completed_count/target*100));
     const nextReward=REWARD_MILESTONES.find(r=>r.count>m.completed_count);
     const isScheduled=!m.day_of_week.length||m.day_of_week.includes(dayLabel);
-
     return`<div class="menu-item" style="${!isScheduled?'opacity:0.6':''}">
       <div class="menu-name">${m.name} <span class="count-badge">${m.completed_count}回</span>${!isScheduled?'<span style="font-size:11px;color:#aaa;margin-left:6px">（この日程外）</span>':''}</div>
       <div class="menu-detail">${m.sets}セット × ${m.reps}レップ ${m.weight?'/ '+m.weight:''}</div>
