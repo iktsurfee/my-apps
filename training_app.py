@@ -33,9 +33,9 @@ def init_db():
                     note TEXT DEFAULT '',
                     created_at TEXT
                 );
+                ALTER TABLE logs ADD COLUMN IF NOT EXISTS note TEXT DEFAULT '';
             """)
         conn.commit()
-
 init_db()
 
 PRAISE_MESSAGES = [
