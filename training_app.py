@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
-import os, uuid
-from datetime import datetime, date
+import os, uuid, json
+from datetime import datetime, date, timedelta
 
 app = Flask(__name__)
 
@@ -30,6 +30,7 @@ def init_db():
                     menu_id TEXT,
                     log_date TEXT,
                     completed BOOLEAN DEFAULT TRUE,
+                    note TEXT DEFAULT '',
                     created_at TEXT
                 );
             """)
@@ -56,13 +57,19 @@ REWARDS = [
 
 def menu_to_dict(row):
     d = dict(row)
-    import json
     if isinstance(d.get('day_of_week'), str):
         try:
             d['day_of_week'] = json.loads(d['day_of_week'])
         except:
             d['day_of_week'] = []
     return d
+
+def recalc_count(conn, menu_id):
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM logs WHERE menu_id=%s AND completed=TRUE", (menu_id,))
+        count = cur.fetchone()[0]
+        cur.execute("UPDATE menus SET completed_count=%s WHERE id=%s", (count, menu_id))
+    return count
 
 @app.route('/')
 def index():
@@ -77,7 +84,6 @@ def get_menus():
 
 @app.route('/api/menus', methods=['POST'])
 def add_menu():
-    import json
     b = request.get_json()
     m = {
         'id': str(uuid.uuid4()),
@@ -101,7 +107,6 @@ def add_menu():
 
 @app.route('/api/menus/<mid>', methods=['PUT'])
 def update_menu(mid):
-    import json
     b = request.get_json()
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -118,6 +123,7 @@ def update_menu(mid):
 def del_menu(mid):
     with get_conn() as conn:
         with conn.cursor() as cur:
+            cur.execute("DELETE FROM logs WHERE menu_id=%s", (mid,))
             cur.execute("DELETE FROM menus WHERE id=%s", (mid,))
         conn.commit()
     return jsonify({'ok': True})
@@ -134,7 +140,7 @@ def get_logs():
 def get_all_logs():
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM logs ORDER BY log_date DESC")
+            cur.execute("SELECT * FROM logs ORDER BY log_date DESC, created_at DESC")
             return jsonify([dict(r) for r in cur.fetchall()])
 
 @app.route('/api/logs', methods=['POST'])
@@ -143,30 +149,30 @@ def add_log():
     menu_id = b.get('menu_id')
     date_str = b.get('date', str(date.today()))
     completed = b.get('completed', True)
+    note = b.get('note', '')
 
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT * FROM logs WHERE menu_id=%s AND log_date=%s", (menu_id, date_str))
             existing = cur.fetchone()
             if existing:
-                cur.execute("UPDATE logs SET completed=%s WHERE id=%s RETURNING *", (completed, existing['id']))
+                cur.execute("UPDATE logs SET completed=%s, note=%s WHERE id=%s RETURNING *",
+                    (completed, note, existing['id']))
                 log = dict(cur.fetchone())
             else:
                 log_id = str(uuid.uuid4())
-                cur.execute("INSERT INTO logs VALUES (%s,%s,%s,%s,%s) RETURNING *",
-                    (log_id, menu_id, date_str, completed, datetime.now().isoformat()))
+                cur.execute("INSERT INTO logs VALUES (%s,%s,%s,%s,%s,%s) RETURNING *",
+                    (log_id, menu_id, date_str, completed, note, datetime.now().isoformat()))
                 log = dict(cur.fetchone())
-
-            # completed_countを更新
-            cur.execute("SELECT COUNT(*) FROM logs WHERE menu_id=%s AND completed=TRUE", (menu_id,))
-            count = cur.fetchone()['count']
-            cur.execute("UPDATE menus SET completed_count=%s WHERE id=%s RETURNING *", (count, menu_id))
+            count = recalc_count(conn, menu_id)
+            cur.execute("SELECT * FROM menus WHERE id=%s", (menu_id,))
             menu = cur.fetchone()
         conn.commit()
 
     praise = None
     reward = None
-    if completed and menu:
+    today = str(date.today())
+    if completed and date_str == today and menu:
         idx = count % len(PRAISE_MESSAGES)
         praise = PRAISE_MESSAGES[idx][0] + " " + PRAISE_MESSAGES[idx][1]
         for r in REWARDS:
@@ -175,6 +181,18 @@ def add_log():
                 break
 
     return jsonify({'log': log, 'praise': praise, 'reward': reward}), 201
+
+@app.route('/api/logs/<lid>', methods=['DELETE'])
+def del_log(lid):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT menu_id FROM logs WHERE id=%s", (lid,))
+            row = cur.fetchone()
+            cur.execute("DELETE FROM logs WHERE id=%s", (lid,))
+            if row:
+                recalc_count(conn, row[0])
+        conn.commit()
+    return jsonify({'ok': True})
 
 @app.route('/api/summary', methods=['GET'])
 def summary():
@@ -208,9 +226,9 @@ nav button.active{color:#43a047;border-bottom-color:#43a047;font-weight:bold}
 .card{background:#fff;border-radius:12px;padding:16px;margin-bottom:12px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
 h3{font-size:16px;margin-bottom:12px;color:#333}
 .form-row{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}
-.form-row input,.form-row select{flex:1;min-width:90px;padding:10px;border:1px solid #ddd;border-radius:8px;font-size:14px}
+.form-row input,.form-row select,.form-row textarea{flex:1;min-width:90px;padding:10px;border:1px solid #ddd;border-radius:8px;font-size:14px}
 .form-row label{font-size:12px;color:#888;width:100%;margin-bottom:2px}
-.btn{padding:10px 16px;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:bold}
+.btn{padding:10px 16px;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:bold;transition:.2s}
 .btn-primary{background:#43a047;color:#fff}
 .btn-edit{background:#1976d2;color:#fff;padding:6px 10px;font-size:12px}
 .btn-danger{background:#ef5350;color:#fff;padding:6px 10px;font-size:12px}
@@ -220,7 +238,7 @@ h3{font-size:16px;margin-bottom:12px;color:#333}
 .menu-name{font-weight:bold;font-size:15px;margin-bottom:4px}
 .menu-detail{font-size:13px;color:#666;margin-bottom:8px}
 .menu-footer{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px}
-.check-btn{padding:8px 14px;border:none;border-radius:20px;cursor:pointer;font-size:13px;font-weight:bold}
+.check-btn{padding:8px 14px;border:none;border-radius:20px;cursor:pointer;font-size:13px;font-weight:bold;transition:.2s}
 .check-btn.done{background:#43a047;color:#fff}
 .check-btn.todo{background:#e8f5e9;color:#43a047;border:2px solid #43a047}
 .progress-bar{height:8px;background:#e0e0e0;border-radius:4px;overflow:hidden;margin:6px 0}
@@ -246,8 +264,28 @@ h3{font-size:16px;margin-bottom:12px;color:#333}
 .edit-form.show{display:block}
 .log-item{display:flex;justify-content:space-between;align-items:center;padding:10px;border-radius:8px;background:#f9f9f9;margin-bottom:6px;font-size:14px}
 .badge-done{background:#e8f5e9;color:#43a047;padding:3px 8px;border-radius:10px;font-size:11px}
+.badge-skip{background:#ffebee;color:#e53935;padding:3px 8px;border-radius:10px;font-size:11px}
 .empty{text-align:center;color:#bbb;padding:20px;font-size:14px}
 .reward-list-item{display:flex;align-items:center;gap:10px;padding:10px;border-radius:8px;background:#fff9c4;border:1px solid #f9a825;margin-bottom:8px}
+/* 日付ナビゲーション */
+.date-nav{display:flex;align-items:center;justify-content:space-between;background:#fff;border-radius:12px;padding:12px 16px;margin-bottom:12px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+.date-nav-btn{background:#e8f5e9;border:none;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:18px;color:#43a047;font-weight:bold}
+.date-nav-btn:hover{background:#c8e6c9}
+.date-display{text-align:center;flex:1}
+.date-display-main{font-size:16px;font-weight:bold;color:#333}
+.date-display-sub{font-size:12px;color:#999;margin-top:2px}
+.date-today-btn{background:#43a047;color:#fff;border:none;border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer;margin-top:4px}
+/* 過去実績入力 */
+.past-log-section{background:#fff3e0;border:1px solid #ffb74d;border-radius:12px;padding:14px;margin-bottom:12px}
+.past-log-title{font-size:14px;font-weight:bold;color:#e65100;margin-bottom:10px}
+.past-menu-row{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid #ffe0b2}
+.past-menu-row:last-child{border-bottom:none}
+.past-menu-name{font-size:14px;flex:1}
+.past-toggle{display:flex;gap:6px}
+.past-btn{padding:5px 12px;border:none;border-radius:16px;cursor:pointer;font-size:12px;font-weight:bold}
+.past-btn-done{background:#43a047;color:#fff}
+.past-btn-skip{background:#ef5350;color:#fff}
+.past-btn-none{background:#e0e0e0;color:#666}
 </style>
 </head>
 <body>
@@ -266,7 +304,7 @@ h3{font-size:16px;margin-bottom:12px;color:#333}
   <h1>トレーニング管理</h1>
 </header>
 <nav>
-  <button class="active" onclick="showPage('today',this)">📅 今日</button>
+  <button class="active" onclick="showPage('today',this)">📅 記録</button>
   <button onclick="showPage('menus',this)">🏋️ メニュー</button>
   <button onclick="showPage('history',this)">📊 履歴</button>
   <button onclick="showPage('rewards',this)">🎁 ご褒美</button>
@@ -279,8 +317,20 @@ h3{font-size:16px;margin-bottom:12px;color:#333}
     <div class="stat-card"><div class="stat-num" id="stat-today">0</div><div class="stat-label">今日完了</div></div>
     <div class="stat-card"><div class="stat-num" id="stat-all">0</div><div class="stat-label">累計完了</div></div>
   </div>
+
+  <!-- 日付ナビゲーション -->
+  <div class="date-nav">
+    <button class="date-nav-btn" onclick="changeDate(-1)">‹</button>
+    <div class="date-display">
+      <div class="date-display-main" id="date-display-main"></div>
+      <div class="date-display-sub" id="date-display-sub"></div>
+      <div><button class="date-today-btn" onclick="goToday()" id="today-btn" style="display:none">今日に戻る</button></div>
+    </div>
+    <button class="date-nav-btn" onclick="changeDate(1)" id="next-btn">›</button>
+  </div>
+
   <div class="card">
-    <h3>📅 今日のトレーニング <span id="today-date" style="font-size:12px;color:#999"></span></h3>
+    <h3 id="day-title">📅 トレーニング記録</h3>
     <div id="today-list"></div>
   </div>
 </div>
@@ -331,7 +381,7 @@ h3{font-size:16px;margin-bottom:12px;color:#333}
 </div>
 
 <script>
-const DAYS=['日','月','火','水','木','金','土'];
+const DAYS_JP=['日','月','火','水','木','金','土'];
 const REWARD_MILESTONES=[
   {count:5,emoji:'🌟',title:'5回達成！',reward:'好きなスムージーを飲もう！'},
   {count:10,emoji:'🎁',title:'10回達成！',reward:'新しいトレーニングウェアを買おう！'},
@@ -340,9 +390,45 @@ const REWARD_MILESTONES=[
   {count:50,emoji:'👑',title:'50回達成！',reward:'特別なディナーでお祝いしよう！'},
   {count:100,emoji:'🚀',title:'100回達成！',reward:'旅行に行って自分にご褒美！'},
 ];
-let menus=[],logs=[],allLogs=[];
-const todayStr=new Date().toISOString().slice(0,10);
-document.getElementById('today-date').textContent=new Date().toLocaleDateString('ja-JP',{month:'long',day:'numeric',weekday:'long'});
+
+let menus=[], allLogs=[];
+let currentDate = new Date();
+currentDate.setHours(0,0,0,0);
+
+function dateToStr(d){return d.toISOString().slice(0,10)}
+function todayStr(){return dateToStr(new Date())}
+
+function updateDateNav(){
+  const today = new Date();today.setHours(0,0,0,0);
+  const isToday = currentDate.getTime()===today.getTime();
+  const isFuture = currentDate > today;
+  document.getElementById('next-btn').style.opacity = isFuture?'0.3':'1';
+  document.getElementById('next-btn').disabled = isFuture;
+  document.getElementById('today-btn').style.display = isToday?'none':'inline-block';
+  const dateStr = dateToStr(currentDate);
+  const dayLabel = DAYS_JP[currentDate.getDay()];
+  document.getElementById('date-display-main').textContent = 
+    currentDate.toLocaleDateString('ja-JP',{year:'numeric',month:'long',day:'numeric'});
+  document.getElementById('date-display-sub').textContent = `（${dayLabel}曜日）${isToday?'今日':''}`;
+  document.getElementById('day-title').textContent = 
+    isToday ? '📅 今日のトレーニング' : `📅 ${dateStr} のトレーニング`;
+}
+
+function changeDate(delta){
+  const today = new Date();today.setHours(0,0,0,0);
+  const next = new Date(currentDate);
+  next.setDate(next.getDate()+delta);
+  if(next>today) return;
+  currentDate = next;
+  updateDateNav();
+  loadDayLogs();
+}
+
+function goToday(){
+  currentDate = new Date();currentDate.setHours(0,0,0,0);
+  updateDateNav();
+  loadDayLogs();
+}
 
 function showPage(id,btn){
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
@@ -363,40 +449,71 @@ async function api(method,path,body){
 }
 
 async function loadAll(){
-  [menus,logs,allLogs]=await Promise.all([
+  [menus, allLogs] = await Promise.all([
     api('GET','/api/menus'),
-    api('GET','/api/logs?date='+todayStr),
     api('GET','/api/logs/all')
   ]);
   const summary=await api('GET','/api/summary');
   document.getElementById('stat-total').textContent=summary.total_menus;
   document.getElementById('stat-today').textContent=summary.today_completed;
   document.getElementById('stat-all').textContent=summary.total_logs;
-  renderToday();
+  updateDateNav();
+  renderDayLogs();
   renderMenus();
 }
 
-function renderToday(){
+async function loadDayLogs(){
+  allLogs = await api('GET','/api/logs/all');
+  const summary=await api('GET','/api/summary');
+  document.getElementById('stat-today').textContent=summary.today_completed;
+  document.getElementById('stat-all').textContent=summary.total_logs;
+  renderDayLogs();
+}
+
+function getLogsForDate(dateStr){
+  return allLogs.filter(l=>l.log_date===dateStr);
+}
+
+function renderDayLogs(){
   const el=document.getElementById('today-list');
-  const todayDay=DAYS[new Date().getDay()];
-  const todayMenus=menus.filter(m=>!m.day_of_week.length||m.day_of_week.includes(todayDay));
-  if(!todayMenus.length){el.innerHTML='<div class="empty">今日のメニューなし<br><small>メニュータブから追加してください</small></div>';return;}
-  el.innerHTML=todayMenus.map(m=>{
-    const log=logs.find(l=>l.menu_id===m.id);
+  const dateStr=dateToStr(currentDate);
+  const dayLogs=getLogsForDate(dateStr);
+  const dayLabel=DAYS_JP[currentDate.getDay()];
+  const today=new Date();today.setHours(0,0,0,0);
+  const isToday=currentDate.getTime()===today.getTime();
+
+  const dayMenus=menus.filter(m=>!m.day_of_week.length||m.day_of_week.includes(dayLabel));
+
+  if(!menus.length){
+    el.innerHTML='<div class="empty">メニューなし<br><small>メニュータブから追加してください</small></div>';
+    return;
+  }
+
+  el.innerHTML=menus.map(m=>{
+    const log=dayLogs.find(l=>l.menu_id===m.id);
     const done=log&&log.completed;
+    const skipped=log&&!log.completed;
     const target=m.goal_weeks*(m.day_of_week.length||3);
     const pct=Math.min(100,Math.round(m.completed_count/target*100));
     const nextReward=REWARD_MILESTONES.find(r=>r.count>m.completed_count);
-    return`<div class="menu-item">
-      <div class="menu-name">${m.name} <span class="count-badge">${m.completed_count}回</span></div>
+    const isScheduled=!m.day_of_week.length||m.day_of_week.includes(dayLabel);
+
+    return`<div class="menu-item" style="${!isScheduled?'opacity:0.6':''}">
+      <div class="menu-name">${m.name} <span class="count-badge">${m.completed_count}回</span>${!isScheduled?'<span style="font-size:11px;color:#aaa;margin-left:6px">（この日程外）</span>':''}</div>
       <div class="menu-detail">${m.sets}セット × ${m.reps}レップ ${m.weight?'/ '+m.weight:''}</div>
-      ${nextReward?`<div style="font-size:11px;color:#f57c00;margin-bottom:4px">🎯 次のご褒美まであと${nextReward.count-m.completed_count}回: ${nextReward.reward}</div>`:''}
+      ${isToday&&nextReward?`<div style="font-size:11px;color:#f57c00;margin-bottom:4px">🎯 次のご褒美まであと${nextReward.count-m.completed_count}回: ${nextReward.reward}</div>`:''}
       <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
       <div style="font-size:11px;color:#999;margin-bottom:8px">目標進捗: ${pct}% (${m.completed_count}/${target}回)</div>
       <div class="menu-footer">
-        <button class="check-btn ${done?'done':'todo'}" onclick="toggleLog('${m.id}',${done})">
-          ${done?'✅ 完了！':'⬜ 未完了'}
-        </button>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="check-btn ${done?'done':'todo'}" onclick="setLog('${m.id}','${dateStr}',true)">
+            ${done?'✅ 完了！':'⬜ 完了にする'}
+          </button>
+          ${!done?`<button class="check-btn" style="background:#ffebee;color:#e53935;border:2px solid #e53935" onclick="setLog('${m.id}','${dateStr}',false)">
+            ${skipped?'❌ スキップ済':'スキップ'}
+          </button>`:''}
+          ${log?`<button class="btn btn-danger" style="font-size:11px;padding:4px 8px" onclick="delLog('${log.id}')">取消</button>`:''}
+        </div>
       </div>
     </div>`;
   }).join('');
@@ -450,14 +567,17 @@ function renderHistory(){
   const sorted=[...allLogs].sort((a,b)=>b.log_date.localeCompare(a.log_date));
   const byDate={};
   sorted.forEach(l=>{if(!byDate[l.log_date]) byDate[l.log_date]=[];byDate[l.log_date].push(l);});
-  el.innerHTML=Object.entries(byDate).slice(0,14).map(([d,logs])=>`
+  el.innerHTML=Object.entries(byDate).slice(0,30).map(([d,logs])=>`
     <div style="margin-bottom:12px">
       <div style="font-weight:bold;color:#555;margin-bottom:6px;font-size:14px">📅 ${d}</div>
       ${logs.map(l=>{
         const m=menus.find(m=>m.id===l.menu_id);
         return`<div class="log-item">
           <span>${m?m.name:'削除済みメニュー'}</span>
-          <span class="${l.completed?'badge-done':'badge-skip'}">${l.completed?'✅ 完了':'スキップ'}</span>
+          <div style="display:flex;gap:6px;align-items:center">
+            <span class="${l.completed?'badge-done':'badge-skip'}">${l.completed?'✅ 完了':'❌ スキップ'}</span>
+            <button style="background:none;border:none;color:#aaa;cursor:pointer;font-size:12px" onclick="delLog('${l.id}')">✕</button>
+          </div>
         </div>`;
       }).join('')}
     </div>`).join('');
@@ -487,15 +607,21 @@ function showReward(reward){
 }
 function closeReward(){document.getElementById('reward-overlay').classList.remove('show')}
 
-async function toggleLog(menuId,isDone){
-  const result=await api('POST','/api/logs',{menu_id:menuId,completed:!isDone});
-  if(result.praise&&!isDone){
+async function setLog(menuId,dateStr,completed){
+  const result=await api('POST','/api/logs',{menu_id:menuId,date:dateStr,completed});
+  const isToday=dateStr===todayStr();
+  if(result.praise&&completed&&isToday){
     const box=document.getElementById('praise-box');
     box.textContent=result.praise;
     box.style.display='block';
     setTimeout(()=>box.style.display='none',4000);
   }
-  if(result.reward&&!isDone) setTimeout(()=>showReward(result.reward),500);
+  if(result.reward&&completed&&isToday) setTimeout(()=>showReward(result.reward),500);
+  loadAll();
+}
+
+async function delLog(logId){
+  await api('DELETE','/api/logs/'+logId);
   loadAll();
 }
 
@@ -530,7 +656,7 @@ async function saveEdit(id){
 }
 
 async function delMenu(id){
-  if(!confirm('削除しますか？'))return;
+  if(!confirm('削除しますか？関連する記録も全て削除されます。'))return;
   await api('DELETE','/api/menus/'+id);
   loadAll();
 }
@@ -541,6 +667,5 @@ loadAll();
 </html>"""
 
 if __name__ == '__main__':
-    import os
     port = int(os.environ.get('PORT', 5002))
     app.run(host='0.0.0.0', port=port)
